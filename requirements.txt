@@ -1,0 +1,14 @@
+# development requirements
+numpy
+matplotlib
+tensorflow-cpu
+keras
+scikit-learn
+scikit-image
+scikit-optimize
+lime
+shap
+tqdm
+attrdict
+# pip install -e git+https://github.com/marcoancona/DeepExplain.git#egg=deepexplain
+# Do deepexplain via sdist approach, otherwise won't work in jupyter
