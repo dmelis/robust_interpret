@@ -25,8 +25,8 @@ import numpy as np
 import pdb
 
 import matplotlib
-    # Hack to be able to save plots in janis
-    matplotlib.use('Agg')
+
+matplotlib.use('Agg') # Hack to be able to save plots in remote machine
 
 import tensorflow as tf
 from keras.preprocessing import image

@@ -10,5 +10,6 @@ lime
 shap
 tqdm
 attrdict
+joblib
 # pip install -e git+https://github.com/marcoancona/DeepExplain.git#egg=deepexplain
 # Do deepexplain via sdist approach, otherwise won't work in jupyter

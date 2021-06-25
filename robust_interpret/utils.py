@@ -25,14 +25,14 @@ import matplotlib.pyplot as plt
 from skimage import feature, transform
 from matplotlib.colors import ListedColormap
 from mpl_toolkits.axes_grid1.inset_locator import InsetPosition
+from scipy.stats import pearsonr, spearmanr
+import seaborn as sns
 
-
-try:
-    from SENN.utils import plot_dependencies
-except:
-    print('Couldnt find SENN')
-# with sp.warnings.catch_warnings():
-#     sp.warnings.filterwarnings('ignore', r'Ill-conditioned matrix')
+def as_si(x, ndp):
+    """ Convert humber to latex-style x10 scientific notation string"""
+    s = '{x:0.{ndp:d}e}'.format(x=x, ndp=ndp)
+    m, e = s.split('e')
+    return r'{m:s}\times 10^{{{e:d}}}'.format(m=m, e=int(e))
 
 
 def rgb2gray_converter(x):
@@ -156,6 +156,114 @@ def plot_linear_explainer_multifeat(explainer, X, y, line_scale=1, plot_dims=Non
     if title:
         ax.set_title(title)
 
+def plot_dependencies(dictionary_values,
+                      pos_color="#ff4d4d",
+                      negative_color="#3DE8F7",
+                      reverse_values=False,
+                      sort_rows =True,
+                      scale_values = True,
+                      title="",
+                      fig_size=(4, 4),
+                      ax = None,
+                      x = None,
+                      digits = 1, prediction_text = None,
+                      show_table = False, ax_table = None):
+    """ This function was adapted form the fairml python package
+        x needed only if show_table = True
+        digits: (int) significant digits in table
+    """
+    # add check to make sure that dependence features are not zeros
+    if np.sum(np.array(dictionary_values.values())) == 0.0:
+        print("Feature dependence for all attributes equal zero."
+              " There is nothing to plot here. ")
+        return None
+
+    column_names = list(dictionary_values.keys())
+    coefficient_values = list(dictionary_values.values())
+
+    # get maximum
+    maximum_value = np.absolute(np.array(coefficient_values)).max()
+    if scale_values:
+        coefficient_values = ((np.array(coefficient_values) / maximum_value) * 100)
+
+    if sort_rows:
+        index_sorted = np.argsort(np.array(coefficient_values))
+    else:
+        index_sorted = range(len(coefficient_values))[::-1]
+
+    sorted_column_names = list(np.array(column_names)[index_sorted])
+    sorted_column_values = list(np.array(coefficient_values)[index_sorted])
+    pos = np.arange(len(sorted_column_values)) + 0.7
+
+    # rearrange this at some other point.
+    def assign_colors_to_bars(array_values,
+                              pos_influence=pos_color,
+                              negative_influence=negative_color,
+                              reverse=reverse_values):
+
+        # if you want the colors to be reversed for positive
+        # and negative influences.
+        if reverse:
+            pos_influence, negative_influence = (negative_influence,
+                                                 pos_influence)
+
+        # could rewrite this as a lambda function
+        # but I understand this better
+        def map_x(x):
+            if x > 0:
+                return pos_influence
+            else:
+                return negative_influence
+        bar_colors = list(map(map_x, array_values))
+        return bar_colors
+
+    bar_colors = assign_colors_to_bars(coefficient_values, reverse=True)
+    bar_colors = list(np.array(bar_colors)[index_sorted])
+
+    #pdb.set_trace()
+    if ax is None and not show_table:
+        #pdb.set_trace()
+        fig, ax = plt.subplots(figsize=fig_size)
+    elif ax is None and show_table:
+        fig, axes = plt.subplots(1, 2, figsize=fig_size)
+        ax_table, ax = axes
+
+    ax.barh(pos, sorted_column_values, align='center', color=bar_colors)
+    ax.set_yticks(pos)
+    ax.set_yticklabels(sorted_column_names)
+    if scale_values:
+        ax.set_xlim(-105, 105)
+    else:
+        pass
+        #ax.set_xlim(-1.05, 1.05)
+    if title:
+        ax.set_title("{}".format(title))
+
+    if show_table and ax_table:
+        cell_text = [[('%1.' + str(digits) + 'f') % v] for v in x]
+        if prediction_text is None:
+            ax_table.axis('off')
+        else:
+            print('here')
+            ax_table.set_xticklabels([])
+            ax_table.set_yticklabels([])
+            ax_table.set_yticks([])
+            ax_table.set_xticks([])
+            for side in ['top', 'right', 'bottom', 'left']:
+                ax_table.spines[side].set_visible(False)
+            ax_table.set_xlabel(prediction_text)
+
+        ax_table.table(cellText=cell_text,
+                                  rowLabels=sorted_column_names[::-1],
+                                  rowColours=bar_colors[::-1],
+                                  colLabels=None,#['Value'],
+                                  colWidths=[1],
+                                  loc='left', cellLoc = 'right',
+                                  bbox=[0.2, 0.025, 0.95, 0.95])
+        ax_table.set_title('Input Value')
+        return ax, ax_table
+
+    return ax
 
 def plot_importances(explainer, x, y, ax=None, feat=0):
     cm = plt.cm.RdBu
@@ -330,6 +438,42 @@ def deepexplain_plot(data, xi=None, cmap='RdBu_r', axis=plt, percentile=100, dil
                     cmap=cmap_xi, alpha=alpha)
     axis.axis('off')
     return axis
+
+
+def plot_prob_drop(attribs, prob_drop, save_path = None):
+
+    ind = np.arange(len(attribs))
+    column_names = [str(j) for j in range(1,22)]
+
+    width = 0.65
+
+    fig, ax1 = plt.subplots(figsize=(8,4))
+
+    color1 = '#377eb8'
+    ax1.bar(ind+width+0.35, attribs, 0.45, color=color1)
+    ax1.set_ylabel(r'Feature Relevance $\theta(x)_i$',color=color1, fontsize = 14)
+    #ax1.set_ylim(-1,1)
+    ax1.set_xlabel('Feature')
+    ax1.tick_params(axis='y', colors=color1)
+
+
+    color2 = '#ff7f00'
+    ax2 = ax1.twinx()
+    ax2.ticklabel_format(style='sci',scilimits=(-2,2),axis = 'y')
+    ax2.plot(ind+width+0.35, prob_drop, 'bo', linestyle='dashed', color=color2)
+    ax2.set_ylabel('Probability Drop', color = color2, fontsize = 14)
+    ax2.tick_params(axis='y', colors=color2)
+
+
+    ax1.set_xticks(ind+width+(width/2))
+    ax1.set_xticklabels(column_names)
+
+    fig.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches = 'tight', format='pdf', dpi=300)
+
+    plt.show()
+
 
 
 def plot_attribution_stability(model, explainers, input, pert_type='gauss', noise_level=0.5,
@@ -528,3 +672,121 @@ def lipschitz_feature_argmax_plot(x, y, att_x, att_y, pred_x = None, pred_y =Non
     if save_path:
         plt.savefig(save_path, bbox_inches='tight', format='pdf', dpi=300)
     plt.show(block=False)
+
+
+
+def attrib_consistency_plot(df, xvar, yvar, xerrvar=None, yerrvar=None,
+                    figsize=(6,5), title=None, hue='dataset',
+                    show_correlation=True, corrtype='pearson', sci_pval=True,
+                    annotate=True, annotation_arrows=True, annotation_fontsize=12,
+                    force_text=0.5,
+                    legend_fontsize=12,
+                    title_fontsize=12,
+                    marker_size=12,
+                    arrowcolor='gray',
+                    barcolor='gray',
+                    xlabel = 'Attribution Score',
+                    ylabel = r'Prediction Probability Change',
+                    hue_legend=False,
+                    color='#1f77b4',
+                    lw=1,
+                    xlim=None,
+                    ylim=None,
+                    ax=None,
+                    show=True,
+                    save_path=None):
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    #### Compute Correlation
+    if show_correlation:
+        if corrtype == 'spearman':
+            corr, p = spearmanr(df[xvar], df[yvar])
+            corrsymbol = '\\rho'
+        elif corrtype == 'pearson':
+            corr, p = pearsonr(df[xvar], df[yvar])
+            corrsymbol = 'r'
+        else:
+            raise ValueError('Unrecognized correlation type')
+        if p < 0.01 and sci_pval:
+            legend_label = r"${}: {:2.2f}$".format(corrsymbol,corr) + "\n" + r"p-value: ${:s}$".format(as_si(p,1))
+        else:
+            legend_label = r"${}: {:2.2f}$".format(corrsymbol,corr) + "\n" + r"p-value: ${:2.2f}$".format(p)
+    else:
+        legend_label = None
+
+
+    ### Actual Plots - First does scatter only, second does line
+    if hue == 'dataset': # Regplot doesn't take hue arg, so plot point separaetly
+        sns.scatterplot(xvar,yvar, hue=hue, cmap='Set',data=df, ax = ax)#size=marker_size,
+        if hue_legend:
+            scatter_legend = ax.legend(loc='best')
+
+        sns.regplot(x=xvar, y=yvar, data=df, ax = ax, color=color, label=legend_label,
+                scatter_kws={'alpha': 0.0},
+                line_kws={'lw': lw}
+                )
+
+        H, L = ax.get_legend_handles_labels()
+        _line_handles = [ax.get_lines()[0]], [L[-1]]
+        #ax.legend([ax.get_lines()[0]], ax.get_legend_handles_labels()[-1],handlelength=1.0,loc='best')#, handletextpad=0.0)
+
+
+        #line_legend = ax.legend(loc='best')
+        #h, l = ax.get_legend_handles_labels()  # contains both line and point labels
+        #pdb.set_trace()
+        ax.legend()
+    else:
+        sns.regplot(x=xvar, y=yvar, data=df, ax = ax, color=color, label=legend_label,
+                scatter_kws={'s':marker_size},
+                line_kws={'lw': lw}
+                )
+    #
+    #
+    # ### Add Error Bars
+    # if xerrvar or yerrvar:
+    #     xerr = df[xerrvar] if xerrvar else None
+    #     yerr = df[yerrvar] if yerrvar else None
+    #     #ax.errorbar(df[xvar], df[yvar], xerr=xerr, yerr=yerr, color=barcolor, fmt='none')
+    #     ax.errorbar(df[xvar], df[yvar], xerr=xerr, yerr=yerr, fmt='none', ecolor='#d6d4d4',  alpha=0.75,elinewidth=0.75)
+
+    # ### Annotate Points
+    # if annotate:
+    #     texts = []
+    #     for i,a in df.iterrows():
+    #         lab = r'{}$\rightarrow${}'.format(a.src,a.tgt) if a.tgt is not None else r'{}'.format(a.src)
+    #         texts.append(ax.text(a[xvar], a[yvar], lab,fontsize=annotation_fontsize))
+    #     #texts= [ax.text(a[xvar],a[yvar],, ) for i,a in df.iterrows()]
+    #     if annotation_arrows:
+    #         adjust_text(texts, force_text=force_text, arrowprops=dict(arrowstyle="-", color=arrowcolor, alpha=0.5, lw=0.5))
+    #     else:
+    #         adjust_text(texts, force_text=force_text)
+
+    ### Fix Legend for Correlation (otherwise don't show)
+    if show_correlation:
+        plt.rc('legend',fontsize=legend_fontsize)#,borderpad=0.2,handletextpad=0, handlelength=0) # using a size in points
+        #pdb.set_trace()
+        #H, L = ax.get_legend_handles_labels()
+        #ax.legend([ax.get_lines()[0]], ax.get_legend_handles_labels()[-1],handlelength=1.0,loc='best')#, handletextpad=0.0)
+        #line_legend = ax.legend([ax.get_lines()[0]], [L[-1]],handlelength=1.0,loc='best')#, handletextpad=0.0)
+        line_legend = ax.legend(*_line_handles,handlelength=1.0,loc='best')#, handletextpad=0.0)
+        if hue_legend: ax.add_artist(scatter_legend)
+
+
+    ### Add title and labels
+    ax.set_xlabel(xlabel, fontsize=title_fontsize)
+    ax.set_ylabel(ylabel, fontsize=title_fontsize)
+    ax.set_title(r'Attribution Score Consistency' + (': {}'.format(title) if title else ''), fontsize=title_fontsize)
+
+    if xlim is not None: ax.set_xlim(xlim)
+    if ylim is not None: ax.set_ylim(ylim)
+
+
+    #fig.tight_layout()
+    if save_path:
+        plt.savefig(save_path, format='pdf', dpi=300, bbox_inches = "tight")
+
+    if show: plt.show()
+
+    return ax

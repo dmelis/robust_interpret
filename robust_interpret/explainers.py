@@ -16,7 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import os
+import pdb
 from pprint import pprint
+from attrdict import AttrDict
 import scipy as sp
 import numpy as np
 from skopt import gp_minimize, gbrt_minimize
@@ -28,7 +30,9 @@ import tempfile
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 #import multiprocessing
-from sklearn.externals.joblib import Parallel, delayed
+#from sklearn.externals.joblib import Parallel, delayed
+from joblib import Parallel, delayed
+
 from sklearn.metrics.pairwise import pairwise_distances
 
 
@@ -55,29 +59,23 @@ try:
     from keras.models import Sequential, Model
     from deepexplain.tensorflow import DeepExplain
     from keras.wrappers.scikit_learn import KerasClassifier
+    withkeras = True
 except:
+    withkeras = False
     print('Tensorflow/Keras. Robust interpret wont be able to test DeepExplain models')
 
 
 # UTILS
-from .utils import deepexplain_plot
+from .utils import deepexplain_plot, plot_prob_drop
 from .utils import rgb2gray_converter
 from .utils import topk_argmax
 
-import pdb
 
 
 #   - make all wrappers uniform by passing model, not just predict_proba method,
 #     since DeepX needs the full model. Can then take whatever method is required inside each class.
 #   - seems like for deepexplain can choose between true and predicted class easlity. Add that option.
 
-try:
-    from SENN.utils import plot_prob_drop
-except:
-    print('Couldnt find SENN')
-
-def test():
-    print("5")
 
 def make_keras_picklable():
     def __getstate__(self):
@@ -102,7 +100,7 @@ def make_keras_picklable():
 
 
 def _parallel_lipschitz(wrapper, i, x, bound_type, eps, n_calls):
-    make_keras_picklable()
+    if withkeras: make_keras_picklable()
     print('\n\n ***** PARALLEL : Example ' + str(i) + '********')
     print(wrapper.net.__dict__.keys())
     if 'model' in wrapper.net.__dict__.keys():
@@ -114,6 +112,10 @@ def _parallel_lipschitz(wrapper, i, x, bound_type, eps, n_calls):
 
 
 class explainer_wrapper(object):
+    """
+        Wrapper class for interpretability methods - yields a unified callable
+        for easy comparison of methods.
+    """
     def __init__(self, model, mode, explainer, multiclass=False,
                  feature_names=None, class_names=None, train_data=None):
         self.mode = mode
@@ -122,26 +124,27 @@ class explainer_wrapper(object):
         self.feature_names = feature_names
         self.multiclass = multiclass
         self.class_names = class_names
-        self.train_data = train_data  # Necessary only to get data distrib stats
+        self.x_train, self.y_train = train_data  # Necessary only to get data distrib stats
 
-        if self.train_data is not None:
+        if self.x_train is not None:
             # These are per-feature dim statistics
             print("Computing train data stats...")
-            self.train_stats = {
-                'min': self.train_data.min(0),
-                'max': self.train_data.max(0),
-                'mean': self.train_data.mean(0),
-                'std': self.train_data.std(0)
-            }
-            # pprint(self.train_stats)
+            self.x_stats = AttrDict({
+                'min': self.x_train.min(0),
+                'max': self.x_train.max(0),
+                'mean': self.x_train.mean(0),
+                'median': np.median(self.x_train,axis=0),
+                'std': self.x_train.std(0)
+            })
 
-    def estimate_dataset_lipschitz(self, dataset, continuous=True, eps=1, maxpoints=None,
-                                   optim='gp', bound_type='box', n_jobs=1, n_calls=10, verbose=False):
+    def estimate_dataset_lipschitz(self, dataset, continuous=True, eps=1,
+                                   maxpoints=None, optim='gp', bound_type='box',
+                                   n_jobs=1, n_calls=10, verbose=False):
         """
             Continuous and discrete space version.
 
         """
-        make_keras_picklable()
+        if withkeras: make_keras_picklable()
         n = len(dataset)
         if maxpoints and n > maxpoints:
             dataset_filt = dataset[np.random.choice(n, maxpoints)]
@@ -168,7 +171,7 @@ class explainer_wrapper(object):
             || f(x) - f(y) ||/||x - y||
 
         """
-        # NEed this ungly hack because skopt sends lists
+        # Need this ugly hack because skopt sends lists
         if type(x) is list:
             x = np.array(x)
         if type(y) is list:
@@ -177,12 +180,11 @@ class explainer_wrapper(object):
             # Necessary because gpopt requires to flatten things, need to restrore expected sshape here
             x = x.reshape(reshape)
             y = y.reshape(reshape)
-        #print(x.shape, x.ndim)
         multip = -1 if minus else 1
         return multip * np.linalg.norm(self(x) - self(y)) / np.linalg.norm(x - y)
 
     def local_lipschitz_estimate(self, x, optim='gp', eps=None, bound_type='box',
-                                 clip=True, n_calls=100, njobs = -1, verbose=False):
+                                 clip=True, n_calls=100, n_jobs = -1, verbose=False):
         """
             Compute one-sided lipschitz estimate for explainer. Adequate for local
              Lipschitz, for global must have the two sided version. This computes:
@@ -207,20 +209,20 @@ class explainer_wrapper(object):
         if eps is None:
             # If want to find global lipzhitz ratio maximizer - search over "all space" - use max min bounds of dataset fold of interest
             # gp can't have lower bound equal upper bound - so move them slightly appart
-            lwr = self.train_stats['min'].flatten() - 1e-6
-            upr = self.train_stats['max'].flatten() + 1e-6
+            lwr = self.x_stats['min'].flatten() - 1e-6
+            upr = self.x_stats['max'].flatten() + 1e-6
         elif bound_type == 'box':
             lwr = (x - eps).flatten()
             upr = (x + eps).flatten()
         elif bound_type == 'box_std':
             # gp can't have lower bound equal upper bound - so set min std to 0.001
             lwr = (
-                x - eps * np.maximum(self.train_stats['std'], 0.001)).flatten()
+                x - eps * np.maximum(self.x_stats['std'], 0.001)).flatten()
             upr = (
-                x + eps * np.maximum(self.train_stats['std'], 0.001)).flatten()
+                x + eps * np.maximum(self.x_stats['std'], 0.001)).flatten()
         if clip:
-            lwr = lwr.clip(min=self.train_stats['min'].min())
-            upr = upr.clip(max=self.train_stats['max'].max())
+            lwr = lwr.clip(min=self.x_stats['min'].min())
+            upr = upr.clip(max=self.x_stats['max'].max())
         bounds = list(zip(*[lwr, upr]))
         if x.ndim > 2:
             # This is an image, will need to reshape
@@ -236,13 +238,13 @@ class explainer_wrapper(object):
             f = partial(self.lipschitz_ratio, x,
                         reshape=orig_shape, minus=True)
             res = gp_minimize(f, bounds, n_calls=n_calls,
-                              verbose=verbose, n_jobs=njobs)
+                              verbose=verbose, n_jobs=n_jobs)
         elif optim == 'gbrt':
             print('Running BlackBox Minimization with Gradient Boosted Trees')
             f = partial(self.lipschitz_ratio, x,
                         reshape=orig_shape, minus=True)
             res = gbrt_minimize(f, bounds, n_calls=n_calls,
-                                verbose=verbose, n_jobs=njobs)
+                                verbose=verbose, n_jobs=n_jobs)
 
         lip, x_opt = -res['fun'], np.array(res['x'])
         if verbose:
@@ -277,7 +279,7 @@ class explainer_wrapper(object):
         # Same with self dists
         den_dists[den_dists==0] = -1 #float('inf')
         if same_class:
-            
+
             for i in range(n):
                 for j in range(n):
                     if Preds_class[i] != Preds_class[j]:
@@ -289,59 +291,104 @@ class explainer_wrapper(object):
         argmaxes = {i:  [(j,v) for (j,v) in zip(inds[i,:],vals[i,:])] for i in range(n)}
         return vals.squeeze(), argmaxes
 
-    def compute_dataset_consistency(self,  dataset, reference_value = 0):
+    def compute_dataset_consistency(self,  dataset, intervention_types='median'):
         """
             does compute_prob_drop for all dataset, returns stats and plots
 
         """
-        drops = []
-        atts  = []
-        corrs = []
-        for x in dataset:
-            p_d, att = self.compute_prob_drop(x)
-            p_d = p_d.squeeze()
-            att = att.squeeze()
-            drops.append(p_d)
-            atts.append(att)
-            #pdb.set_trace()
-            #assert len(p_d).shape[0] == atts.shape[0], "Attributions has wrong size"
-            #pdb.set_trace()
-            corrs.append(np.corrcoef(p_d, att)[0,1]) # Compute correlation per sample, then aggreate
+        if type(intervention_types) is str:
+            intervention_types = [intervention_types]
 
-        corrs = np.array(corrs)
-        # pdb.set_trace()
-        # drops = np.stack(drops)
-        # atts  = np.stack(atts)
-        #
-        # np.corrcoef(drops.flatten(), atts.flatten())
-        return corrs
+        results = []
 
-    def compute_prob_drop(self, x, reference_value = 0, plot = False, save_path = None):
+        for x in tqdm(dataset):
+            attscores = self(x.reshape(1,-1)).squeeze()
+            pred = self.model(x.reshape(1,-1)).argmax()
+
+            empirical_lls = []
+            for i,xi in enumerate(x):
+                unique, counts = np.unique(self.y_train[np.isclose(xi, self.x_train[:,i], rtol = 1e-2)], return_counts=True)
+                llratio = counts[np.where(unique==pred)[0][0]]
+                empirical_lls.append(llratio)
+
+            res = {'x': x, 'attscores': attscores, 'prior': (self.y_train == pred).sum()/len(self.y_train)}
+            pdb.set_trace()
+            for inter in intervention_types:
+                Δp, p, p̂, xsub  = self.compute_prob_change(x, inter)
+                if not 'p' in res: # p should be the same regardless of internention type, add once only
+                    res['p'] = p
+                if inter in ['median', 'deflate']:
+                    # Consitent if high relevance ~ large negative p (i.e., prob of prdicted class drops)
+                    corr = np.corrcoef(-Δp, attscores)[0,1]
+                elif inter == 'heighten':
+                    # Consistent if high relevance ~ p increases with heightening
+                    corr = np.corrcoef(Δp, attscores)[0,1]
+
+
+                res['xsub_'+inter]  = xsub
+                res['phats_'+inter] = p̂
+                res['delta_'+inter] = Δp
+                res['corr_'+inter]  = corr
+
+            results.append(res)
+
+        # Convert from list of dicts to dict of lists
+        results = {k: [d[k] for d in results] for k in results[0]}
+
+        return results
+
+    def compute_prob_change(self, x, intervention_type='median', scaling=0.1,
+                          plot = False, save_path = None):
         """
+            Computes change in probability of predicted class given change in input:
+
+                    δ_i =  p(y|x̂_i) - p(y|x)   for every i
+
+            The form of x̂ is determined by the 'intervention_type':
+                - median: repalce x_i by median value in training data
+                - heighten: make x_i more 'extreme' by heightening in the directon away
+                            from median (i.e., add if > median, subtract if < median)
+                            by a factor of heighten_scale*sd(x_i). E.g., heighten_scale=0.5
+                            and x_i is 0.7 s.d. from than the median, it will now be
+                            1.2 sd from the median (in same direction)
+
             Warning: this only works for SENN if concepts are inputs!!!!
             In that case, must use the compute prob I have in SENN class.
         """
-        f   = self.model(x.reshape(1,-1))
-        pred_class = f.argmax()
-        attributions = self(x)
+        fx = self.model(x.reshape(1,-1))
+        pred_class = fx.argmax()
+        p = fx.squeeze()[pred_class]
+        p̂s = []
         deltas = []
+        subs_vals = []
+
         for i in tqdm(range(x.shape[0])):
-            x_p = x.copy()
-            x_p[i] = reference_value
-            f_p = self.model(x_p.reshape(1,-1))
-            delta_i = (f - f_p)[0,pred_class]
+            x̂ = x.copy()
+            if intervention_type == 'median':
+                x̂[i] = self.x_stats.median[i]
+            elif intervention_type == 'heighten':
+                direction = np.sign(x[i] - self.x_stats.median[i])
+                x̂[i] = x[i] + direction*scaling*self.x_stats.std[i]
+            elif intervention_type == 'deflate':
+                direction = -np.sign(x[i] - self.x_stats.median[i])
+                x̂[i] = x[i] + direction*scaling*self.x_stats.std[i]
+            subs_vals.append(x̂[i])
+            fx̂ = self.model(x̂.reshape(1,-1))
+            delta_i = (fx̂-fx).squeeze()[pred_class]
+            p̂s.append(fx̂.squeeze()[pred_class])
             deltas.append(delta_i)
-        prob_drops = np.array(deltas)
-        if plot:
-            plot_prob_drop(attributions, prob_drops, save_path = save_path)
-        return prob_drops, attributions
+        deltas = np.array(deltas)
+        p̂s     = np.array(p̂s)
+        subs_vals = np.array(subs_vals)
+        # if plot:
+        #     plot_prob_drop(attributions, deltas, save_path = save_path)
+        return deltas, p, p̂s, subs_vals
 
 
     def plot_image_attributions_(self, x, attributions):
         """
             x: either (n x d) if features or (n x d1 x d2) if gray image or (n x d1 x d2 x c) if color
         """
-        
         # for different types of data _display_attribs_image , etc
         n_cols = 4
         n_rows = max(int(len(attributions) / 2), 1)
@@ -382,7 +429,7 @@ class shap_wrapper(explainer_wrapper):
         super().__init__(model, mode, None, multiclass,
                          feature_names, class_names, train_data)
         if shap_type == 'kernel':
-            explainer = shap.KernelExplainer(model, train_data, link=link)
+            explainer = shap.KernelExplainer(model, self.x_train, link=link)
 
         self.explainer = explainer
         self.nsamples = nsamples
@@ -420,7 +467,7 @@ class shap_wrapper(explainer_wrapper):
         #     exp = exp_classes[y] # explanation of desired class for multiclass case
         if self.multiclass:
             exp = np.array([exp_classes[y[i]][i]
-                            for i in range(len(exp_classes[0]))])  
+                            for i in range(len(exp_classes[0]))])
         else:
             exp = exp_classes
 
@@ -448,8 +495,9 @@ class lime_wrapper(explainer_wrapper):
                  segmenter=None, verbose=False):
         print('Initializing {} LIME explainer wrapper'.format(lime_type))
         if lime_type == 'tabular':
+            self.channels = channels
             explainer = lime.lime_tabular.LimeTabularExplainer(
-                train_data, feature_names=feature_names, class_names=class_names,
+                train_data[0], feature_names=feature_names, class_names=class_names,
                 discretize_continuous=False, categorical_features=categorical_features,
                 verbose=verbose, mode=mode, feature_selection=feature_selection)
         elif lime_type == 'image':
@@ -491,7 +539,7 @@ class lime_wrapper(explainer_wrapper):
         return vals
 
     def extract_att_image(self, exp, y=None):
-        
+
         if y is None or (type(y) in [list,tuple] and y[0] is None):
             y = exp.top_labels[0]
         scores = self.get_img_weight_matrix_(exp,
@@ -526,13 +574,11 @@ class lime_wrapper(explainer_wrapper):
         return scores
 
     def __call__(self, x, y=None, x_raw=None,  return_dict=False, show_plot=False):
-        
         # the only thing that will change is labels and toplabels
-
         # if y is None:
         #     # No target class provided - use predicted
         #     y = self.model(x).argmax(1)
-        #     
+        #
         if (self.lime_type == 'tabular' and x.ndim == 1) or \
            (self.lime_type == 'image' and x.ndim == 3):
             if not self.multiclass:
@@ -619,7 +665,6 @@ class lime_wrapper(explainer_wrapper):
             assert x.shape[-1] == 3
             attributions = np.tile(attributions[:,:,:,np.newaxis], (1,1,1,3))
 
-        #pdb.set_trace()
         if attributions.ndim > 1:
             # WHY DO WE NEED THIS? SEEMSS LIKE ELSE version is the way to unifoirmize one vs multiple examples
             # Was this needed for images?
@@ -726,14 +771,13 @@ class gsenn_wrapper(explainer_wrapper):
         self.input_type = input_type
         self.net = model
         self.skip_bias = skip_bias # If we added bias term in SENN, remove from attributions
-        #pdb.set_trace()
         # if type(model) is KerasClassifier:
         #     self.net = model.model
         # elif type(model) in [Model, Sequential]:
         #     self.net = model
         super().__init__(self.net.predict_proba, mode, None,
                          multiclass, feature_names, class_names, None)
-        
+
         # dataloader or Dataset that does not involve iterating
         stack = []
         for input,_ in train_data:
@@ -742,7 +786,7 @@ class gsenn_wrapper(explainer_wrapper):
         transformed_dataset = np.concatenate(stack)
         if train_data is not None:
             print("Computing train data stats...")
-            self.train_stats = {
+            self.x_stats = {
                 'min': np.min(transformed_dataset,0),
                 'max': np.max(transformed_dataset,0),
                 'mean': np.mean(transformed_dataset,0),
@@ -796,7 +840,6 @@ class gsenn_wrapper(explainer_wrapper):
         if y is None:
             # Will compute attribution w.r.t. predicted class
             vals, argmaxs = torch.max(pred.data, -1)
-            #pdb.set_trace()
             attributions = attrib_mat.gather(2,argmaxs.view(-1,1).unsqueeze(2).repeat(1,natt,nclass))[:,:,0].numpy()
             #attributions = attrib_mat[:,:,argmaxs].squeeze(-1).numpy()
             #attributions = attributions.reshape()
@@ -812,14 +855,12 @@ class gsenn_wrapper(explainer_wrapper):
         if show_plot:
             if self.input_type == 'image':
                 x_plot = x_raw if (x_raw is not None) else x
-                #pdb.set_trace()
                 if x_raw is None and channels_first:
                     x_plot = x_plot.transpose(1,3).transpose(1,2)
                 if not type(x_plot) is np.ndarray:
                     x_plot = x_plot.numpy().squeeze()
 
                 #x_plot = x_plot.squeeze()
-                #pdb.set_trace()
                 self.plot_image_attributions_(x_plot, attributions)
             else: #if self.input_type == 'feature':
                 exp_dict_y = dict(zip(feat_names, att_y))
@@ -834,3 +875,112 @@ class gsenn_wrapper(explainer_wrapper):
         else:
             exp_dict = dict(zip(self.feature_names, vals))
             return exp_dict
+
+
+import sys
+sys.path.append('../../workspace/interpretwoe/')
+from interpretwoe.explainers import WoEExplainer
+from interpretwoe.woe import woe_gaussian
+
+class woe_wrapper(explainer_wrapper):
+    def __init__(self, model, mode, woe_explainer=None,
+                 multiclass=False, feature_names=None,
+                 class_names=None, train_data=None, num_features=None,
+                 expl_units='features',
+                 featgroup_idxs = None,
+                 featgroup_names= None,
+                 nsamples=100, verbose=False):
+
+
+        #pdb.set_trace()
+        if woe_explainer is None:
+            assert expl_units == 'features' or not (featgroup_idxs is None)
+            print('Initializing WOE explainer wrapper')
+            woe_model = woe_gaussian(model, train_data[0], classes = range(len(class_names)), cond_type='nb')
+
+            # if expl_units == 'features':
+            #     featgroup_idxs = np.arange(len(feature_names))
+            #     featgroup_names = feature_names
+
+            # Instantiate woe-based explainer
+            woe_explainer = WoEExplainer(model, woe_model,
+                                  total_woe_correction=False,
+                                  classes=class_names, features=feature_names,
+                                  X=train_data[0], Y=None,#Y_train,
+                                  featgroup_idxs = featgroup_idxs,
+                                  featgroup_names = featgroup_names)
+
+
+        self.explainer = woe_explainer
+        self.units = expl_units
+        super().__init__(model.predict_proba, mode, woe_explainer, multiclass,
+                         feature_names, class_names, train_data)
+
+    def __call__(self, x, y=None,  x_raw=None, return_dict=False, show_plot=False):
+        """
+            y only needs to be specified in the multiclass case. In that case,
+            it's the class to be explained (typically, one would take y to be
+            either the predicted class or the true class). If it's a single value,
+            same class explained for all inputs
+        """
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        if y is None:
+            y = np.argmax(self.model(x))
+        y = y.reshape(1,)
+
+        exp = self.explainer.explain(x, y, units=self.units,
+                                   print=False, plot=False)
+
+        self.explanation = exp
+
+        exp_dict = dict(zip(self.feature_names + ['bias'], exp.attwoes.tolist() + [exp.prior_lodds]))
+        vals = np.array([exp_dict[feat]
+                         for feat in self.feature_names if feat in exp_dict.keys()]).T
+        if not return_dict:
+            return vals
+        else:
+            return exp_dict
+
+        # if x.ndim == 1:
+        #     x = x.reshape(1, -1)
+        # if y is None:
+        #     # Explain predicted class
+        #     y = np.argmax(self.model(x).reshape(x.shape[0],len(self.class_names)), axis = 1)
+        # elif y is not None and y.ndim > 1:
+        #     # Means y is given in one-hot format
+        #     y = np.argwhere(y)[:, 1]
+        # elif (type(y) is int or y.ndim == 0) and (x.ndim == 1):
+        #     # Single example
+        #     #y = np.array([y]).reshape(1,1)
+        #     y = [y]
+        #     x = x.reshape(1, -1)
+        # elif (type(y) is int or y.ndim == 0):
+        #     # multiple examples, same class to be explained in all of them
+        #     y = [y] * x.shape[0]
+        #
+        # assert x.shape[0] == len(
+        #     y), "x.shape = {}, len(y) = {}".format(x.shape, len(y))
+        #
+        # exp_classes = self.explainer.shap_values(x, nsamples=self.nsamples, verbose = False)
+        # # print(exp_classes)
+        # # if self.multiclass and type(y) is int:
+        # #     exp = exp_classes[y] # explanation of desired class for multiclass case
+        # if self.multiclass:
+        #     exp = np.array([exp_classes[y[i]][i]
+        #                     for i in range(len(exp_classes[0]))])
+        # else:
+        #     exp = exp_classes
+        #
+        # if x.shape[0] == 1:
+        #     # Squeeze if single prediction
+        #     exp = exp[0]
+        #
+        # self.explanation = exp
+        # exp_dict = dict(zip(self.feature_names + ['bias'], exp.T.tolist()))
+        # vals = np.array([exp_dict[feat]
+        #                  for feat in self.feature_names if feat in exp_dict.keys()]).T
+        # if not return_dict:
+        #     return vals
+        # else:
+        #     return exp_dict

@@ -43,7 +43,7 @@ class Namespace:
 # )
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Self-Explaining Neural Net Classifier')
+    parser = argparse.ArgumentParser(description='Robust Interpretability')
 
     #setup
     parser.add_argument('--train', action='store_true', default=False, help='Whether or not to train model')
